@@ -985,6 +985,128 @@
       return state.follows.some(f => f.rss === rss);
     }
 
+    function escAttr(s) {
+      return s.replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function isDownloaded(url) {
+      return state.downloads.some(d => d.url === url && d.status === 'done');
+    }
+
+    function wasDownloadedBefore(url) {
+      return state.downloadHistory.includes(url);
+    }
+
+    function addToDownloadHistory(url) {
+      if (!state.downloadHistory.includes(url)) {
+        state.downloadHistory.push(url);
+        saveState();
+      }
+    }
+
+    // ========================================
+    // DOWNLOAD SYSTEM
+    // ========================================
+
+    async function startDownload(url, title, podcastTitle, podcastImage, date, duration) {
+      if (state.downloadingUrls.has(url)) return;
+      state.downloadingUrls.add(url);
+      
+      try {
+        const ext = getAudioExt(url);
+        const dlEntry = {
+          url,
+          title,
+          podcastTitle,
+          podcastImage,
+          date,
+          duration,
+          ext,
+          status: 'downloading',
+          progress: 0,
+          blob: null,
+          timestamp: Date.now(),
+          error: null
+        };
+        
+        state.downloads.push(dlEntry);
+        saveState();
+        updateUIForDownload(url);
+
+        const r = await fetchWithProxy(url);
+        const blob = await r.blob();
+
+        const idx = state.downloads.findIndex(d => d.url === url);
+        if (idx !== -1) {
+          state.downloads[idx].blob = blob;
+          state.downloads[idx].status = 'done';
+          state.downloads[idx].progress = 100;
+          addToDownloadHistory(url);
+          saveState();
+          updateUIForDownload(url);
+        }
+      } catch(e) {
+        const idx = state.downloads.findIndex(d => d.url === url);
+        if (idx !== -1) {
+          state.downloads[idx].status = 'failed';
+          state.downloads[idx].error = e.message;
+          saveState();
+          updateUIForDownload(url);
+        }
+      }
+      state.downloadingUrls.delete(url);
+    }
+
+    function updateUIForDownload(url) {
+      const isDone = isDownloaded(url);
+      const isDownloading = state.downloadingUrls.has(url);
+      
+      document.querySelectorAll(`[data-ep-url="${url}"]`).forEach(btn => {
+        btn.classList.toggle('downloading', isDownloading);
+        btn.classList.toggle('done', isDone);
+        if (isDownloading) {
+          btn.innerHTML = '<i class="fas fa-spinner"></i>';
+        } else if (isDone) {
+          btn.innerHTML = '<i class="fas fa-check"></i>';
+        } else {
+          btn.innerHTML = '<i class="fas fa-download"></i>';
+        }
+      });
+
+      document.querySelectorAll(`[data-ep-badge-url="${url}"]`).forEach(badge => {
+        badge.classList.toggle('shown', wasDownloadedBefore(url) && !isDone);
+      });
+    }
+
+    // ========================================
+    // DESCRIPTION MODAL
+    // ========================================
+
+    function openDescModal(epTitle, description) {
+      $('desc-modal-ep-title').textContent = epTitle;
+      const body = $('desc-modal-body');
+      body.innerHTML = '';
+      
+      if (!description) {
+        body.innerHTML = '<p style="color: var(--text-3);">No description available.</p>';
+      } else {
+        const lines = description.split(/\n|<br\s*\/?>/gi);
+        lines.forEach((line, idx) => {
+          if (line.trim()) {
+            const p = document.createElement('p');
+            p.textContent = line.trim();
+            body.appendChild(p);
+          }
+        });
+      }
+      
+      $('desc-modal').classList.add('visible');
+    }
+
+    function closeDescModal() {
+      $('desc-modal').classList.remove('visible');
+    }
+
     // ========================================
     // SEARCH
     // ========================================
@@ -995,128 +1117,104 @@
         return;
       }
 
-      $('search-content').innerHTML = '<div class="skel-card"></div><div class="skel-card"></div><div class="skel-card"></div>';
+      $('search-content').innerHTML = '<div style="padding: 20px; text-align: center; color: var(--text-3);"><i class="fas fa-spinner spinner"></i></div>';
 
       try {
-        const r = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=podcast&limit=20`);
-        const data = await r.json();
+        const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=podcast&limit=20`);
+        const data = await res.json();
         
         if (!data.results || data.results.length === 0) {
-          $('search-content').innerHTML = '<div class="empty-state"><div class="empty-icon"><i class="fas fa-search"></i></div><div class="empty-title">No results found</div><div class="empty-sub">Try searching with different keywords</div></div>';
+          $('search-content').innerHTML = '<div class="empty-state"><div class="empty-icon"><i class="fas fa-search"></i></div><div class="empty-title">No results</div><div class="empty-sub">Try searching with different keywords</div></div>';
           return;
         }
 
-        let html = '';
-        for (const item of data.results) {
-          const rss = item.feedUrl;
-          const title = item.collectionName;
-          const image = item.artworkUrl100;
-          const artist = item.artistName;
-
-          html += `
-            <div class="pod-card" onclick="openPodcastDetail('${rss.replace(/'/g, "\\'")}', '${title.replace(/'/g, "\\'")}', '${image}', '${artist.replace(/'/g, "\\'")}')" >
-              <img class="pod-card-art" src="${image}" alt="${title}">
+        const html = data.results.map(p => {
+          const rss = p.feedUrl;
+          const isFollowing = state.follows.some(f => f.rss === rss);
+          return `
+            <div class="pod-card" onclick="openPodcastDetail('${escAttr(rss)}')">
+              <img class="pod-card-art" src="${escAttr(p.artworkUrl600 || p.artworkUrl100)}" alt="">
               <div class="pod-card-info">
-                <div class="pod-card-title">${title}</div>
-                <div class="pod-card-artist">${artist}</div>
+                <div class="pod-card-title">${escAttr(p.collectionName)}</div>
+                <div class="pod-card-artist">${escAttr(p.artistName)}</div>
               </div>
               <i class="fas fa-chevron-right pod-card-chevron"></i>
             </div>
           `;
-        }
+        }).join('');
         $('search-content').innerHTML = html;
 
-        // Add to search history
         if (!state.searchHistory.includes(query)) {
           state.searchHistory.unshift(query);
-          if (state.searchHistory.length > 20) state.searchHistory.pop();
+          state.searchHistory = state.searchHistory.slice(0, 10);
           saveState();
         }
       } catch(e) {
-        $('search-content').innerHTML = '<div class="empty-state"><div class="empty-icon"><i class="fas fa-exclamation-circle"></i></div><div class="empty-title">Search failed</div><div class="empty-sub">' + (e.message || 'Please try again') + '</div></div>';
+        $('search-content').innerHTML = '<div class="empty-state"><div class="empty-icon"><i class="fas fa-exclamation"></i></div><div class="empty-title">Search failed</div><div class="empty-sub">Please check your connection and try again</div></div>';
       }
     }
-
-    $('search-input').addEventListener('input', (e) => {
-      const q = e.target.value.trim();
-      $('search-clear').classList.toggle('visible', q.length > 0);
-      if (q.length > 0) searchPodcasts(q);
-    });
-
-    $('search-clear').addEventListener('click', () => {
-      $('search-input').value = '';
-      $('search-clear').classList.remove('visible');
-      $('search-content').innerHTML = '<div class="empty-state"><div class="empty-icon"><i class="fas fa-podcast"></i></div><div class="empty-title">Find your next listen</div><div class="empty-sub">Search for any podcast by name, topic, or creator</div></div>';
-    });
 
     // ========================================
     // PODCAST DETAIL
     // ========================================
 
-    async function openPodcastDetail(rss, title, image, artist) {
-      $('podcast-detail').classList.add('open');
-      $('detail-header-title').textContent = title;
+    async function openPodcastDetail(rss) {
+      $('detail-hero').innerHTML = '';
+      $('detail-eps-list').innerHTML = '';
       
-      const following = isFollowing(rss);
-      const btn = $('detail-follow-btn');
-      btn.className = following ? 'detail-follow-btn following' : 'detail-follow-btn not-following';
-      btn.innerHTML = following ? '<i class="fas fa-heart-solid"></i><span>Following</span>' : '<i class="fas fa-heart"></i><span>Follow</span>';
-      btn.onclick = () => toggleFollow(rss, title, image, artist);
-
-      $('detail-hero').innerHTML = `
-        <img class="detail-art" src="${image}" alt="${title}">
-        <div class="detail-hero-info">
-          <div class="detail-hero-title">${title}</div>
-          <div class="detail-hero-artist">${artist}</div>
-          <div class="detail-hero-count">--episodes</div>
-        </div>
-      `;
-
-      $('detail-actions').innerHTML = `
-        <button class="action-btn primary" onclick="playFromDetail()">
-          <i class="fas fa-play"></i>
-          <span>Play Latest</span>
-        </button>
-        <button class="action-btn secondary" onclick="shareDetail()">
-          <i class="fas fa-share"></i>
-          <span>Share</span>
-        </button>
-      `;
-
-      $('detail-eps-list').innerHTML = '<div class="skel-card"></div><div class="skel-card"></div>';
-
       try {
-        const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(rss));
-        const data = await r.json();
-        const feed = parseRSS(data.contents);
-        state.currentPodcast = { rss, title: feed.title, image: feed.image, artist: feed.artist };
-        state.currentEpisodes = feed.episodes;
+        const res = await fetchWithProxy(`https://api.allorigins.win/raw?url=${encodeURIComponent(rss)}`);
+        const xml = await res.text();
+        const podcastData = parseRSS(xml);
+        
+        state.currentPodcast = { rss, ...podcastData };
+        state.currentEpisodes = podcastData.episodes;
 
-        $('detail-hero-count').textContent = feed.episodes.length + ' episodes';
+        $('detail-header-title').textContent = podcastData.title;
 
-        let html = '';
-        for (const ep of feed.episodes.slice(0, 50)) {
-          html += `
+        const isFollowing = isFollowing(rss);
+        const followBtn = $('detail-follow-btn');
+        followBtn.className = `detail-follow-btn ${isFollowing ? 'following' : 'not-following'}`;
+        followBtn.innerHTML = isFollowing 
+          ? '<i class="fas fa-check"></i> Following'
+          : '<i class="fas fa-plus"></i> Follow';
+
+        $('detail-hero').innerHTML = `
+          <img class="detail-art" src="${escAttr(podcastData.image)}" alt="">
+          <div class="detail-hero-info">
+            <div class="detail-hero-title">${escAttr(podcastData.title)}</div>
+            <div class="detail-hero-artist">${escAttr(podcastData.artist)}</div>
+            <div class="detail-hero-count">${podcastData.episodes.length} episodes</div>
+          </div>
+        `;
+
+        const epHtml = podcastData.episodes.map(ep => {
+          const isDone = isDownloaded(ep.url);
+          const wasDownloadedBefore = state.downloadHistory.includes(ep.url);
+          const isDownloading = state.downloadingUrls.has(ep.url);
+          return `
             <div class="ep-item">
-              <button class="ep-play-btn" onclick="playEpisode('${ep.url.replace(/'/g, "\\'")}', '${ep.title.replace(/'/g, "\\'")}', '${feed.image}', '${feed.title.replace(/'/g, "\\'")}')" >
-                <i class="fas fa-play"></i>
-              </button>
-              <div class="ep-info" onclick="showEpisodeDesc('${ep.title.replace(/'/g, "\\'")}', '${ep.description.replace(/'/g, "\\'").replace(/\n/g, '<br>')}')">
-                <div class="ep-title">${ep.title}</div>
+              <button class="ep-play-btn" onclick="playEpisode('${escAttr(ep.url)}', '${escAttr(ep.title)}', '${escAttr(podcastData.title)}', '${escAttr(podcastData.image)}')"><i class="fas fa-play"></i></button>
+              <div class="ep-info" onclick="openDescModal('${escAttr(ep.title)}', '${escAttr(ep.description)}')">
+                <div class="ep-title">${escAttr(ep.title)}</div>
                 <div class="ep-meta">
                   <span>${formatDate(ep.date)}</span>
                   <span>${formatDuration(ep.duration)}</span>
                 </div>
               </div>
-              <button class="ep-dl-btn" onclick="downloadEpisode('${ep.url.replace(/'/g, "\\'")}', '${ep.title.replace(/'/g, "\\'")}')">
-                <i class="fas fa-download"></i>
+              <button class="ep-dl-btn ${isDone ? 'done' : ''} ${isDownloading ? 'downloading' : ''}" data-ep-url="${escAttr(ep.url)}" onclick="event.stopPropagation(); startDownload('${escAttr(ep.url)}', '${escAttr(ep.title)}', '${escAttr(podcastData.title)}', '${escAttr(podcastData.image)}', '${escAttr(ep.date)}', '${escAttr(ep.duration)}')">
+                ${isDownloading ? '<i class="fas fa-spinner"></i>' : isDone ? '<i class="fas fa-check"></i>' : '<i class="fas fa-download"></i>'}
               </button>
+              <div class="ep-dl-badge ${wasDownloadedBefore && !isDone ? 'shown' : ''}" data-ep-badge-url="${escAttr(ep.url)}"><i class="fas fa-check"></i></div>
             </div>
           `;
-        }
-        $('detail-eps-list').innerHTML = html;
+        }).join('');
+        $('detail-eps-list').innerHTML = epHtml;
+
+        $('podcast-detail').classList.add('open');
       } catch(e) {
-        $('detail-eps-list').innerHTML = '<div class="empty-state"><div class="empty-icon"><i class="fas fa-exclamation-circle"></i></div><div class="empty-title">Failed to load episodes</div></div>';
+        showToast('Failed to load podcast', 'error');
+        console.error(e);
       }
     }
 
@@ -1124,57 +1222,142 @@
       $('podcast-detail').classList.remove('open');
     }
 
-    function toggleFollow(rss, title, image, artist) {
-      const idx = state.follows.findIndex(f => f.rss === rss);
-      if (idx >= 0) {
-        state.follows.splice(idx, 1);
-        showToast('Unfollowed');
+    function toggleFollowFromDetail() {
+      if (!state.currentPodcast) return;
+      const rss = state.currentPodcast.rss;
+      const isFollowing = state.follows.some(f => f.rss === rss);
+      
+      if (isFollowing) {
+        state.follows = state.follows.filter(f => f.rss !== rss);
       } else {
-        state.follows.push({ rss, title, image, artist });
-        showToast('Following podcast', 'success');
+        state.follows.push({
+          rss,
+          title: state.currentPodcast.title,
+          image: state.currentPodcast.image,
+          artist: state.currentPodcast.artist
+        });
       }
       saveState();
-      renderFollowing();
-      const following = isFollowing(rss);
-      const btn = $('detail-follow-btn');
-      btn.className = following ? 'detail-follow-btn following' : 'detail-follow-btn not-following';
-      btn.innerHTML = following ? '<i class="fas fa-heart-solid"></i><span>Following</span>' : '<i class="fas fa-heart"></i><span>Follow</span>';
-    }
-
-    function toggleFollowFromDetail() {
-      if (state.currentPodcast) {
-        toggleFollow(state.currentPodcast.rss, state.currentPodcast.title, state.currentPodcast.image, state.currentPodcast.artist);
-      }
-    }
-
-    function playFromDetail() {
-      if (state.currentEpisodes.length > 0) {
-        const ep = state.currentEpisodes[0];
-        playEpisode(ep.url, ep.title, state.currentPodcast.image, state.currentPodcast.title);
-      }
-    }
-
-    function shareDetail() {
-      if (state.currentPodcast && navigator.share) {
-        navigator.share({
-          title: state.currentPodcast.title,
-          text: 'Check out this podcast',
-          url: state.currentPodcast.rss
-        }).catch(() => {});
-      }
+      
+      const followBtn = $('detail-follow-btn');
+      const newIsFollowing = state.follows.some(f => f.rss === rss);
+      followBtn.className = `detail-follow-btn ${newIsFollowing ? 'following' : 'not-following'}`;
+      followBtn.innerHTML = newIsFollowing 
+        ? '<i class="fas fa-check"></i> Following'
+        : '<i class="fas fa-plus"></i> Follow';
+      
+      updateFollowingFeed();
     }
 
     // ========================================
-    // PLAYBACK
+    // FOLLOWING FEED
     // ========================================
 
-    function playEpisode(url, title, image, podcast) {
-      state.currentEpisode = { url, title, image, podcast };
+    async function updateFollowingFeed() {
+      if (state.follows.length === 0) {
+        $('following-content').innerHTML = '<div class="empty-state"><div class="empty-icon"><i class="far fa-heart"></i></div><div class="empty-title">No followed podcasts</div><div class="empty-sub">When you follow podcasts, their latest episodes will appear here</div></div>';
+        return;
+      }
+
+      const allEpisodes = [];
+
+      for (const follow of state.follows) {
+        try {
+          const res = await fetchWithProxy(`https://api.allorigins.win/raw?url=${encodeURIComponent(follow.rss)}`);
+          const xml = await res.text();
+          const podcastData = parseRSS(xml);
+          
+          podcastData.episodes.slice(0, MAX_FEED_EPISODES).forEach(ep => {
+            allEpisodes.push({
+              ...ep,
+              podcastTitle: podcastData.title,
+              podcastImage: podcastData.image,
+              rss: follow.rss
+            });
+          });
+        } catch(e) {
+          console.error(`Failed to load ${follow.title}`, e);
+        }
+      }
+
+      allEpisodes.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+      const html = allEpisodes.map(ep => {
+        const isDone = isDownloaded(ep.url);
+        const isDownloading = state.downloadingUrls.has(ep.url);
+        return `
+          <div class="feed-ep">
+            <img class="feed-ep-art" src="${escAttr(ep.podcastImage)}" alt="">
+            <div class="feed-ep-info" onclick="openDescModal('${escAttr(ep.title)}', '${escAttr(ep.description)}')">
+              <div class="feed-ep-pod">${escAttr(ep.podcastTitle)}</div>
+              <div class="feed-ep-title">${escAttr(ep.title)}</div>
+              <div class="feed-ep-meta">
+                <span>${formatDate(ep.date)}</span>
+                <span>${formatDuration(ep.duration)}</span>
+              </div>
+            </div>
+            <div class="feed-ep-actions">
+              <button class="ep-play-btn" onclick="playEpisode('${escAttr(ep.url)}', '${escAttr(ep.title)}', '${escAttr(ep.podcastTitle)}', '${escAttr(ep.podcastImage)}')"><i class="fas fa-play"></i></button>
+              <button class="ep-dl-btn ${isDone ? 'done' : ''} ${isDownloading ? 'downloading' : ''}" data-ep-url="${escAttr(ep.url)}" onclick="startDownload('${escAttr(ep.url)}', '${escAttr(ep.title)}', '${escAttr(ep.podcastTitle)}', '${escAttr(ep.podcastImage)}', '${escAttr(ep.date)}', '${escAttr(ep.duration)}')">
+                ${isDownloading ? '<i class="fas fa-spinner"></i>' : isDone ? '<i class="fas fa-check"></i>' : '<i class="fas fa-download"></i>'}
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      $('following-content').innerHTML = html || '<div class="empty-state"><div class="empty-icon"><i class="fas fa-inbox"></i></div><div class="empty-title">No new episodes</div><div class="empty-sub">Check back later for new episodes from your followed podcasts</div></div>';
+    }
+
+    // ========================================
+    // DOWNLOADS
+    // ========================================
+
+    function updateDownloadsView() {
+      const dls = state.downloads.filter(d => d.status === 'done');
+      if (dls.length === 0) {
+        $('downloads-content').innerHTML = '<div class="empty-state"><div class="empty-icon"><i class="fas fa-circle-down"></i></div><div class="empty-title">No downloads yet</div><div class="empty-sub">Downloaded episodes will appear here</div></div>';
+        return;
+      }
+
+      const html = dls.map(d => `
+        <div class="dl-item">
+          <div class="dl-item-icon done"><i class="fas fa-check"></i></div>
+          <div class="dl-item-info">
+            <div class="dl-item-title">${escAttr(d.title)}</div>
+            <div class="dl-item-sub">${escAttr(d.podcastTitle)}</div>
+          </div>
+          <div class="dl-item-actions">
+            <button class="dl-item-btn" onclick="playDownload('${escAttr(d.url)}', '${escAttr(d.title)}', '${escAttr(d.podcastTitle)}', '${escAttr(d.podcastImage)}')"><i class="fas fa-play"></i> Play</button>
+            <button class="dl-item-btn delete" onclick="deleteDownload('${escAttr(d.url)}')"><i class="fas fa-trash"></i></button>
+          </div>
+        </div>
+      `).join('');
+      $('downloads-content').innerHTML = html;
+    }
+
+    function deleteDownload(url) {
+      state.downloads = state.downloads.filter(d => d.url !== url);
+      saveState();
+      updateDownloadsView();
+    }
+
+    // ========================================
+    // PLAYER
+    // ========================================
+
+    function playEpisode(url, title, podcastTitle, image) {
+      state.currentEpisode = { url, title, podcastTitle, image };
       audio.src = url;
       audio.play();
       state.isPlaying = true;
-      updatePlayer();
-      showToast('Now playing: ' + title);
+      updatePlayerUI();
+      updateMiniPlayer();
+      $('full-player').classList.add('open');
+    }
+
+    function playDownload(url, title, podcastTitle, image) {
+      playEpisode(url, title, podcastTitle, image);
     }
 
     function togglePlayback() {
@@ -1186,7 +1369,8 @@
         audio.play();
         state.isPlaying = true;
       }
-      updatePlayer();
+      updatePlayerUI();
+      updateMiniPlayer();
     }
 
     function seekRelative(sec) {
@@ -1197,53 +1381,32 @@
       const idx = SPEEDS.indexOf(state.speed);
       state.speed = SPEEDS[(idx + 1) % SPEEDS.length];
       audio.playbackRate = state.speed;
-      $('fp-speed-btn').textContent = state.speed + 'x';
+      $('fp-speed-btn').textContent = state.speed === 1 ? '1x' : `${state.speed}x`;
       saveState();
     }
 
-    function updatePlayer() {
-      const hasEp = !!state.currentEpisode;
-      $('mini-player').classList.toggle('visible', hasEp);
-      if (!hasEp) return;
-
-      const ep = state.currentEpisode;
-      $('mini-title').textContent = ep.title;
-      $('mini-sub').textContent = ep.podcast;
-      $('mini-art').src = ep.image;
-      $('fp-artwork').src = ep.image;
-      $('fp-title').textContent = ep.title;
-      $('fp-podcast').textContent = ep.podcast;
-
+    function updatePlayerUI() {
       const icon = state.isPlaying ? 'fa-pause' : 'fa-play';
-      $('mini-play-icon').className = `fas ${icon}`;
       $('fp-play-icon').className = `fas ${icon}`;
+      $('mini-play-icon').className = `fas ${icon}`;
     }
 
-    audio.addEventListener('timeupdate', () => {
-      const dur = audio.duration || 1;
-      $('fp-time-current').textContent = formatTime(audio.currentTime);
-      $('fp-time-duration').textContent = formatTime(dur);
-      $('fp-seek-bar').max = Math.ceil(dur);
-      $('fp-seek-bar').value = Math.ceil(audio.currentTime);
-      $('mini-progress-fill').style.width = (audio.currentTime / dur * 100) + '%';
-    });
-
-    audio.addEventListener('play', () => {
-      state.isPlaying = true;
-      updatePlayer();
-    });
-
-    audio.addEventListener('pause', () => {
-      state.isPlaying = false;
-      updatePlayer();
-    });
-
-    $('fp-seek-bar').addEventListener('input', (e) => {
-      audio.currentTime = e.target.value;
-    });
+    function updateMiniPlayer() {
+      if (!state.currentEpisode) return;
+      $('mini-art').src = state.currentEpisode.image;
+      $('mini-title').textContent = state.currentEpisode.title;
+      $('mini-sub').textContent = state.currentEpisode.podcastTitle;
+      $('mini-player').classList.add('visible');
+    }
 
     function openFullPlayer() {
-      if (state.currentEpisode) $('full-player').classList.add('open');
+      if (!state.currentEpisode) return;
+      $('full-player').classList.add('open');
+      $('fp-artwork').src = state.currentEpisode.image;
+      $('fp-title').textContent = state.currentEpisode.title;
+      $('fp-podcast').textContent = state.currentEpisode.podcastTitle;
+      $('fp-speed-btn').textContent = state.speed === 1 ? '1x' : `${state.speed}x`;
+      audio.playbackRate = state.speed;
     }
 
     function closeFullPlayer() {
@@ -1251,152 +1414,103 @@
     }
 
     // ========================================
-    // DESCRIPTION MODAL
-    // ========================================
-
-    function showEpisodeDesc(title, description) {
-      $('desc-modal-ep-title').textContent = title;
-      $('desc-modal-body').innerHTML = description;
-      $('desc-modal').classList.add('visible');
-    }
-
-    function closeDescModal() {
-      $('desc-modal').classList.remove('visible');
-    }
-
-    // ========================================
-    // DOWNLOADS
-    // ========================================
-
-    async function downloadEpisode(url, title) {
-      if (state.downloadingUrls.has(url)) return;
-      state.downloadingUrls.add(url);
-      showToast('Downloading...');
-
-      try {
-        const r = await fetch(url);
-        const blob = await r.blob();
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = sanitize(title) + '.' + getAudioExt(url);
-        a.click();
-
-        state.downloads.push({ title, url, date: new Date().toISOString() });
-        state.downloadHistory.push(url);
-        saveState();
-        showToast('Downloaded!', 'success');
-      } catch(e) {
-        showToast('Download failed', 'error');
-      }
-      
-      state.downloadingUrls.delete(url);
-    }
-
-    function downloadCurrentEpisode() {
-      if (state.currentEpisode) {
-        downloadEpisode(state.currentEpisode.url, state.currentEpisode.title);
-      }
-    }
-
-    // ========================================
-    // FOLLOWING & FEED
-    // ========================================
-
-    function renderFollowing() {
-      if (state.follows.length === 0) {
-        $('following-content').innerHTML = '<div class="empty-state"><div class="empty-icon"><i class="far fa-heart"></i></div><div class="empty-title">No followed podcasts</div><div class="empty-sub">When you follow podcasts, their latest episodes will appear here</div></div>';
-        return;
-      }
-
-      let html = '';
-      for (const follow of state.follows) {
-        html += `
-          <div style="cursor:pointer" onclick="openPodcastDetail('${follow.rss.replace(/'/g, "\\'")}', '${follow.title.replace(/'/g, "\\'")}', '${follow.image}', '${follow.artist.replace(/'/g, "\\'")}')" >
-            <div class="feed-ep">
-              <img class="feed-ep-art" src="${follow.image}" alt="${follow.title}">
-              <div class="feed-ep-info">
-                <div class="feed-ep-pod">${follow.title}</div>
-                <div class="feed-ep-title">Latest episodes</div>
-                <div class="feed-ep-meta"><span>${follow.artist}</span></div>
-              </div>
-            </div>
-          </div>
-        `;
-      }
-      $('following-content').innerHTML = html;
-    }
-
-    // ========================================
     // SETTINGS
     // ========================================
 
-    function renderSettings() {
-      const speedOpts = SPEEDS.map(s => `
-        <button class="speed-opt ${s === state.speed ? 'active' : ''}" onclick="setSpeed(${s})">${s}x</button>
-      `).join('');
-      $('speed-options').innerHTML = speedOpts;
+    function clearSearchHistory() {
+      state.searchHistory = [];
+      saveState();
+      showToast('Search history cleared');
+    }
+
+    function clearFollows() {
+      state.follows = [];
+      saveState();
+      updateFollowingFeed();
+      showToast('Followed podcasts cleared');
+    }
+
+    function clearDownloads() {
+      state.downloads = [];
+      saveState();
+      updateDownloadsView();
+      showToast('Downloads cleared');
+    }
+
+    function initSpeedOptions() {
+      const container = $('speed-options');
+      container.innerHTML = SPEEDS.map(s => {
+        const label = s === 1 ? '1x' : `${s}x`;
+        return `<button class="speed-opt ${s === state.speed ? 'active' : ''}" onclick="setSpeed(${s})">${label}</button>`;
+      }).join('');
     }
 
     function setSpeed(s) {
       state.speed = s;
       audio.playbackRate = s;
       saveState();
-      renderSettings();
-      $('fp-speed-btn').textContent = s + 'x';
+      initSpeedOptions();
     }
-
-    function clearSearchHistory() {
-      if (confirm('Clear search history?')) {
-        state.searchHistory = [];
-        saveState();
-        showToast('Cleared', 'success');
-      }
-    }
-
-    function clearFollows() {
-      if (confirm('Unfollow all podcasts?')) {
-        state.follows = [];
-        saveState();
-        renderFollowing();
-        showToast('Cleared', 'success');
-      }
-    }
-
-    function clearDownloads() {
-      if (confirm('Clear downloads list?')) {
-        state.downloads = [];
-        saveState();
-        showToast('Cleared', 'success');
-      }
-    }
-
-    // ========================================
-    // TAB NAVIGATION
-    // ========================================
-
-    function switchTab(tab) {
-      state.currentTab = tab;
-      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      $('view-' + tab).classList.add('active');
-      document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
-
-      if (tab === 'following') renderFollowing();
-      if (tab === 'settings') renderSettings();
-    }
-
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-    });
 
     // ========================================
     // INIT
     // ========================================
 
-    renderSettings();
-    renderFollowing();
-    audio.playbackRate = state.speed;
+    document.addEventListener('DOMContentLoaded', () => {
+      initSpeedOptions();
+      
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+          document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+          btn.classList.add('active');
+          const tab = btn.dataset.tab;
+          $(`view-${tab}`).classList.add('active');
+          state.currentTab = tab;
+          if (tab === 'following') updateFollowingFeed();
+          if (tab === 'downloads') updateDownloadsView();
+        });
+      });
 
+      $('search-input').addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          searchPodcasts(e.target.value);
+        }
+      });
+
+      $('search-input').addEventListener('input', e => {
+        $('search-clear').classList.toggle('visible', !!e.target.value);
+      });
+
+      $('search-clear').addEventListener('click', () => {
+        $('search-input').value = '';
+        $('search-clear').classList.remove('visible');
+        $('search-content').innerHTML = '<div class="empty-state"><div class="empty-icon"><i class="fas fa-podcast"></i></div><div class="empty-title">Find your next listen</div><div class="empty-sub">Search for any podcast by name, topic, or creator</div></div>';
+      });
+
+      audio.addEventListener('timeupdate', () => {
+        const pct = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
+        $('mini-progress-fill').style.width = pct + '%';
+        $('fp-seek-bar').value = (audio.currentTime / audio.duration) * 1000;
+        $('fp-time-current').textContent = formatTime(audio.currentTime);
+        $('fp-time-duration').textContent = formatTime(audio.duration);
+      });
+
+      audio.addEventListener('ended', () => {
+        state.isPlaying = false;
+        updatePlayerUI();
+      });
+
+      $('fp-seek-bar').addEventListener('input', e => {
+        audio.currentTime = (e.target.value / 1000) * audio.duration;
+      });
+
+      document.addEventListener('click', e => {
+        if (e.target.closest('#desc-modal') && !e.target.closest('.desc-modal-card')) {
+          closeDescModal();
+        }
+      });
+    });
   </script>
 </body>
 </html>
